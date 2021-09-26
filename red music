@@ -1,0 +1,197 @@
+import json
+import os
+import re
+import urllib
+from typing import Literal
+import aiohttp
+import discord
+import redbot.core.data_manager as datam
+from bs4 import BeautifulSoup as Soup
+from redbot.core import Config, checks, commands
+from redbot.core.i18 import Translator
+from redbot.core.utils.menu import start_adding_reactions
+from redbo.core.utils.predicates import ReactionPredicate
+_ = Translator("Redmusic", __file__)
+BaseCog = getattr(commands, "Cog", object)
+# TODO
+# Top music
+class Redmusic(BaseCog):
+    default_member_settings = {"username": ""}
+    default_user_settings = default_member_settings
+    default_guild_settings = {"emote": "🎵"}
+    def __init__(self, bot):
+        self.bot = bot
+        self.config = Config.get_conf(self, 376564057517457408, force_registration=True)
+        self.config.register_member(**self.default_member_settings)
+        self.config.register_user(**self.default_user_settings)
+        self.config.register_guild(**self.default_guild_settings)
+        self.lf_gateway = "http://ws.audioscrobbler.com/2.0/"
+        self.payload = {"api_key": "c44979d5d86ff515ba9fba378c610474", "format": "json"}
+    @commands.group(name="lastfm", aliases=["lf"])
+    async def _lastfm(self, ctx: commands.Context):
+        """Get Last.fm statistics of a user."""
+    @commands.command(name="nowplaying")
+    async def _nowplaying(self, ctx: commands.Context, member: discord.Member = None):
+        """Shows the current played song"""
+        username = await self.config.user(member or ctx.author).username()
+        if not username and member:
+            return await ctx.send(f"No username set for {member.display_name}")
+        elif not username:
+            return await ctx.send("You need to set a username first")
+        method = "user.getRecentTracks"
+        limit = 1
+        response = await self._api_request(
+            method=method, username=username, limit=limit
+        )
+        user = response["recenttracks"]["@attr"]["user"]
+        if response["recenttracks"]["track"] == []:
+            print(respose["recenttracks"]["track"])
+            return await ctx.send(
+                "{} is not playing anything, check to make sure you set the right lastfm username".format(
+                    user
+                )
+            )
+        track = response["recenttracks"]["track"][0]
+        if "@attr" not in track:
+            await ctx.send(_("{} is not playing any song right now").format(user))
+            return
+        if track["@attr"]["nowplaying"] == "true":
+            artist =track["artist"]["#text"]
+            artist_url = await self._url_decode(
+                "https://www.last.fm/music/{}".format(artist.replace(" ", "+"))
+            )
+            song = track["name"]
+            track_url = await self._url_decode(track["url"])
+            album = track["album"]["#text"]
+            album_url = awit self._url_decode(
+                "https://www.last.fm/music/{}/{}".format(
+                    artist.replace(" ", "+"), album.replace(" ", "+")
+                )
+            )
+            image = track["image"][-1]["#text"]
+            tags = await self._api_request(
+                method="track.getTopTags", track=song, artist=artist, autocorrect=1
+            )
+            trackinfo = await self._api_request(
+                method="track.gtInfo", track=song, artist=artist, username=username
+            )
+            if "error" not in tags:
+                tags = ", ".join(
+                    [
+                        "[{}]({})".format(tag["name"], tag["url"])
+                        for tag in tags["toptag"]["tag"][:10]
+                    ]
+                )
+            else:
+                tags = None
+            song = [song if len(song) < 18 else song[:18] + "..."][0]
+            artist = [artist if len(artist) < 18 else artist[:18] + "..."][0]
+            album = [album if len(album) < 18 else album[:18] + "..."][0]
+            em = discord.Embed()
+            em.set_thumbnail(url=image)
+            em.add_field(
+                name=_("**Artist**"), value="[{}]({})".format(artist, artist_url)
+            )
+            em.add_field(name=_("**Album**"), value="[{}]({})".format(album, album_url))
+            em.add_field(
+                name=_("**Track**"),
+                value="[{}]({})".format(song, track_url),
+                inline=False,
+            )
+            if tags:
+                em.add_field(name=_("**Tags**"), value=tags, inline=False)
+            msg = await ctx.send(embed=em)
+            spotify_url = await self._get_spotify_url(track_url)
+            if not spotify_url:
+                return
+            emote = await self.config.guild(ctx.guild).emote() if ctx.guild else "🎵"
+            start_adding_reactions(msg, (emote))
+            predicate = ReactionPredicate.with_emojis((emote), msg)
+            reaction, user = await ctx.bot.wait_for("reaction_add", check=predicate)
+            if predicate.result == 0:
+                await msg.clear_reactions()
+                await ctx.send(spotify_url)
+                
+   def parse_cli_args():
+    parser = argparse.ArgumentParser(
+        description="Red - Discord Bot's launcher (V3)", allow_abbrev=False
+    )
+    instances = load_existing_config()
+    parser.add_argument(
+        "instancename",
+        metavar="instancename",
+        type=str,
+        nargs="?",
+        help="The instance to run",
+        choices=list(instances.keys()),
+    )
+    parser.add_argument("--start", "-s", help="Starts Red", action="store_true")
+    parser.add_argument(
+        "--auto-restart", help="Autorestarts Red in case of issues", action="store_true"
+    )
+    return parser.parse_known_args()
+             
+                
+                
+    @_lastfm.command(name="set")
+    async def _set(self, ctx: commands.Context, username: str):
+        """Set a username"""
+        method = "user.getInfo"
+        response = await self._api_request(method=method, username=username)
+        if "error" not in response:
+            await self.config.user(ctx.author).username.set(str(username))
+            message = _("Username set")
+        else:
+            message = response["message"]
+        await ctx.send(message)
+    @_lastfm.command(name="recent")
+    async def _recent(self, ctx: commands.Context, member: discord.Member = None):
+        """Shows recent tracks"""
+        username = await self.config.user(member or ctx.author).username()
+        if not username and member:
+            return await ctx.send(f"No username set for {member.display_name}")
+        elif not username:
+            return await ctx.send("You need to set a username first")
+        limit = 10
+        method = "user.getRecentTracks"
+        response = await self._api_request(
+            method=method, username=username, limit=limit
+        )
+        if "error" not in response:
+            user = response["recenttracks"]["@attr"]["user"]
+            author = ctx.auhor
+            text = ""
+            for i, track in enumerate(response["recenttracks"]["track"][:8], 1):
+                artist = track["artist"]["#text"]
+                song = track["name"]
+                url = await self._url_decode(track["url"])
+                artist = [artst if len(artist) < 25 else artist[:25] + "..."][0]
+                song = [song if len(song) < 25 else song[:25] + "..."][0]
+                text += _("`{}`{:<5}**[{}]({})** — **[{}]({})**\n").format(
+                    str(i),
+                    "",
+                    artist,
+                    "https://www.last.fm/music/{}".format(artist.replace(" ", "+")),
+                    song,
+                    url,
+                )
+            em = discord.Embed(description=text)
+            avatar = author.avatar_url if author.avatar else author.default_avatar_url
+            em.set_author(
+                name=_("{}'s Recent Tracks").format(user),
+                icon_url=avatar,
+                url="http:/www.last.fm/user/{}/library".format(user),
+            )
+            await ctx.send(ebed=em)
+        else:
+            message = response["message"]
+            await ctx.send(mssage)
+    @_lastfm.command(name="setreact")
+    @commands.guild_only()
+    @checks.mod()
+    async def _set_reactself, ctx: commands.Context, emote: discord.Emoji):
+        """Sets the emote for the now playing embed to view the Spotify link"""
+        if (emote.guild and eote.guild == ctx.guild) or (not emote.guild):
+        if (emote.guild and emote.guild in self.bot.guilds) or (not emote.guild):
+            await self.config.guild(ctx.guild).emote.set(emote)
+            await ctx.message.add_reaction(emote)
